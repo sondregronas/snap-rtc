@@ -5,7 +5,7 @@ An unnecessary FastAPI abstraction layer to get snapshots from an WebRTC stream 
 ## Why?
 
 Getting images for Home Assistant automations seem to always be delayed (and the url can be hard to read). 
-By keeping the stream open (in a tiny, dynamically allocated buffer) and using a simple API, the snapshots should be way faster. (From ~4s to ~0.5s)
+By keeping the stream open (in a small buffer) and using a simple API, the snapshots should be way faster. (From ~4s to ~0.5s)
 
 ## API
 

@@ -78,20 +78,20 @@ class MJPEGReader:
         self.running = True
         self.latest_frame = None
         self.frame_event = asyncio.Event()
-        self.max_buffer_size = 0
         self._frame_samples = []
 
     async def run(self):
         try:
             while self.running:
-                chunk = await self.stdout.read(max(self.max_buffer_size, 4096))
+                chunk = await self.stdout.read(4096)
                 if not chunk:
                     break
 
                 self.buffer += chunk
 
-                if len(self.buffer) > self.max_buffer_size > 0:
-                    self.buffer = b""
+                # If our buffer exceeds 1MB, we can delete the first 512KB
+                if len(self.buffer) > 1024 * 1024:
+                    self.buffer = self.buffer[512 * 1024 :]
 
                 lf = None
                 while True:
@@ -101,11 +101,6 @@ class MJPEGReader:
                         frame = self.buffer[start : end + 2]
                         self.buffer = self.buffer[end + 2 :]
 
-                        # Set the max buffer to 1.2x the size of the last frame
-                        self.max_buffer_size = max(
-                            int(len(frame) * 1.2), self.max_buffer_size
-                        )
-
                         lf = frame
                     else:
                         await asyncio.sleep(0.01)  # Yield control to avoid busy waiting
@@ -113,6 +108,8 @@ class MJPEGReader:
                 if lf:
                     self.latest_frame = lf
                     self.frame_event.set()
+                    # Reset buffer
+                    self.buffer = b""
         except Exception as e:
             print(f"[MJPEGReader] Error: {e}")
 
