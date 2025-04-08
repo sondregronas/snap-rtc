@@ -102,6 +102,7 @@ class MJPEGReader:
                         await asyncio.sleep(0.01)  # Yield control to avoid busy waiting
                         break
                 if lf:
+                    self.buffer = b""
                     self.latest_frame = lf
                     self.frame_event.set()
         except Exception as e:
