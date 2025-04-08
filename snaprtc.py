@@ -89,6 +89,10 @@ class MJPEGReader:
 
                 self.buffer += chunk
 
+                # If our buffer exceeds 1MB, we can delete the first 512KB
+                if len(self.buffer) > 1024 * 1024:
+                    self.buffer = self.buffer[512 * 1024 :]
+
                 lf = None
                 while True:
                     start = self.buffer.find(b"\xff\xd8")
@@ -104,7 +108,7 @@ class MJPEGReader:
                 if lf:
                     self.latest_frame = lf
                     self.frame_event.set()
-                    # Reset the buffer when a new frame is found
+                    # Reset buffer
                     self.buffer = b""
         except Exception as e:
             print(f"[MJPEGReader] Error: {e}")
