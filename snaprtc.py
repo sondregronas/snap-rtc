@@ -89,9 +89,9 @@ class MJPEGReader:
 
                 self.buffer += chunk
 
-                # If our buffer exceeds 1MB, we can delete the first 512KB
-                if len(self.buffer) > 1024 * 1024:
-                    self.buffer = self.buffer[512 * 1024 :]
+                # If our buffer exceeds 10MB, we can delete the first half
+                if len(self.buffer) > 1024 * 1024 * 10:
+                    self.buffer = self.buffer[len(self.buffer) // 2 :]
 
                 lf = None
                 while True:
