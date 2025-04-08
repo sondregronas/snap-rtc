@@ -1,6 +1,5 @@
 import asyncio
 import os
-import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response, HTTPException
@@ -44,8 +43,7 @@ async def lifespan(app: FastAPI):
     yield
 
     for reader in stream_readers.values():
-        await reader.stop()
-    stream_readers.clear()
+        reader.running = False
 
 
 app = FastAPI(lifespan=lifespan)
@@ -53,9 +51,7 @@ app = FastAPI(lifespan=lifespan)
 
 async def ensure_ffmpeg_stream(camera_name: str):
     if camera_name in stream_readers:
-        reader = stream_readers[camera_name]
-        reader.last_used = time.time()
-        return reader
+        return stream_readers[camera_name]
 
     input_url = f"{RTC_HOST}/{camera_name}"
     cmd = INVOCATION.format(input_url=input_url)
@@ -69,23 +65,20 @@ async def ensure_ffmpeg_stream(camera_name: str):
     if not process.stdout:
         raise HTTPException(status_code=500, detail="Failed to open ffmpeg stream")
 
-    reader = MJPEGReader(process.stdout, process)
+    reader = MJPEGReader(process.stdout)
     stream_readers[camera_name] = reader
     asyncio.create_task(reader.run())
     return reader
 
 
 class MJPEGReader:
-    MAX_BUFFER_SIZE = 2 * 1024 * 1024  # 2 MB cap
-
-    def __init__(self, stdout, process):
+    def __init__(self, stdout):
         self.stdout = stdout
-        self.process = process
         self.buffer = b""
         self.running = True
         self.latest_frame = None
         self.frame_event = asyncio.Event()
-        self.last_used = time.time()
+        self._frame_samples = []
 
     async def run(self):
         try:
@@ -95,8 +88,6 @@ class MJPEGReader:
                     break
 
                 self.buffer += chunk
-                if len(self.buffer) > self.MAX_BUFFER_SIZE:
-                    self.buffer = self.buffer[-self.MAX_BUFFER_SIZE :]
 
                 lf = None
                 while True:
@@ -105,6 +96,7 @@ class MJPEGReader:
                     if start != -1 and end != -1 and end > start:
                         frame = self.buffer[start : end + 2]
                         self.buffer = self.buffer[end + 2 :]
+
                         lf = frame
                     else:
                         await asyncio.sleep(0.01)  # Yield control to avoid busy waiting
@@ -116,15 +108,6 @@ class MJPEGReader:
             print(f"[MJPEGReader] Error: {e}")
 
     async def get_fresh_frame(self, timeout=1, _attempts=0):
-        self.last_used = time.time()
-
-        if self.process.returncode is not None:
-            for name, reader in list(stream_readers.items()):
-                if reader is self:
-                    del stream_readers[name]
-                    break
-            raise HTTPException(status_code=500, detail="FFmpeg process has terminated")
-
         try:
             await asyncio.wait_for(self.frame_event.wait(), timeout)
             self.frame_event.clear()
@@ -136,15 +119,6 @@ class MJPEGReader:
                 )
             else:
                 return await self.get_fresh_frame(timeout, _attempts + 1)
-
-    async def stop(self):
-        self.running = False
-        if self.process.returncode is None:
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(self.process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                self.process.kill()
 
 
 @app.get("/{camera_name}")
