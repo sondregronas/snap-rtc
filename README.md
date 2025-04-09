@@ -21,9 +21,6 @@ Returns a (jpeg) snapshot from the stream.
 
 Example url: http://localhost:8200/Backyard
 
-### GET /start/{camera_id}
-Doesn't return anything, but starts the stream for the given camera. Should be called on startup if the environment variable `CAMERAS` is set.
-
 
 ## Disclaimer
 
