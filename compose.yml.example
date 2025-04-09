@@ -6,6 +6,6 @@ services:
     ports:
       - 8200:8000
     environment:
-      - RTC_HOST="rtsp://127.0.0.1:8554"
+      - RTC_HOST=rtsp://127.0.0.1:8554
       # Optionally start on boot, the first invocation will always take ~15s
-      - CAMERAS=""  # Camera1,Camera2
+      - CAMERAS=birdseye,Camera1,Camera2

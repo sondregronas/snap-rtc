@@ -1,146 +1,131 @@
-import asyncio
 import os
+import subprocess
+import threading
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Response, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 
-# Environment Variables
 RTC_HOST = os.getenv("RTC_HOST", "rtsp://127.0.0.1:8554")
-CAMERAS = os.getenv("CAMERAS", "").split(",")  # e.g., "Camera1,Camera2" for preloading
-FPS = int(os.getenv("FPS", 12))  # Default FPS stream, 12 seems to be a good compromise
-QUALITY = int(os.getenv("QUALITY", 8))  # Fast and "Ok" quality
+CAMERAS = os.getenv("CAMERAS", "").split(",")
 
-INVOCATION = (
-    "ffmpeg -rtsp_transport tcp "
-    "-fflags nobuffer "
-    "-flags low_delay "
-    "-strict experimental "
-    "-flags2 +fast "
-    "-fflags +discardcorrupt "
-    "-analyzeduration 0 "
-    "-probesize 32 "
-    "-i {input_url} "
-    "-f mjpeg "
-    f"-q:v {QUALITY} -r {FPS} -update 1 -"
-)
+print(f"RTC_HOST: {RTC_HOST}")
+print(f"CAMERAS: {CAMERAS}")
 
-# FastAPI Settings
-HOST = os.getenv("HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", 8000))
+if CAMERAS == [""]:
+    raise ValueError(
+        "No cameras specified. Set the CAMERAS environment variable with a comma-separated list of camera names."
+    )
+
+latest_frames = {}
+frame_lock = threading.Lock()
 
 
-stream_readers = {}
+def ffmpeg_reader(camera_name: str):
+    """
+    Opens the RTSP stream for the given camera using ffmpeg. If the process ends (e.g., due to a disconnect),
+    the function restarts the FFmpeg process.
+    """
+    while True:
+        stream_url = f"{RTC_HOST}/{camera_name}"
+        cmd = [
+            "ffmpeg",
+            "-rtsp_transport",
+            "tcp",
+            "-i",
+            stream_url,
+            "-vf",
+            "fps=1",
+            "-f",
+            "mjpeg",
+            "pipe:1",
+        ]
+
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        if process.stdout is None:
+            print(f"Failed to open stream for camera {camera_name}")
+            time.sleep(5)
+            continue
+
+        print(f"Started FFmpeg process for camera {camera_name}")
+        buffer = bytearray()
+        SOI = b"\xff\xd8"  # Start Of Image.
+        EOI = b"\xff\xd9"  # End Of Image.
+        last_data_time = time.time()
+        try:
+            while True:
+                chunk = process.stdout.read(1024 * 8)
+                if chunk:
+                    last_data_time = time.time()
+                    buffer.extend(chunk)
+                else:
+                    # If no data is received for a while, break to restart process.
+                    if time.time() - last_data_time > 5:
+                        print(
+                            f"No data received for camera {camera_name}, restarting FFmpeg process."
+                        )
+                        process.kill()
+                        break
+                    time.sleep(0.1)
+                    continue
+
+                while True:
+                    # Look for a complete JPEG image in the buffer.
+                    start = buffer.find(SOI)
+                    if start == -1:
+                        break  # No start marker found yet.
+                    end = buffer.find(EOI, start + 2)
+                    if end == -1:
+                        break  # End marker not found; wait for more data.
+                    end += 2
+                    jpeg_bytes = bytes(buffer[start:end])
+                    buffer = buffer[end:]
+
+                    with frame_lock:
+                        latest_frames[camera_name] = jpeg_bytes
+        except Exception as e:
+            print(f"Error processing stream for camera {camera_name}: {e}")
+            process.kill()
+
+        # Wait briefly before restarting the process.
+        time.sleep(2)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Lifespan context manager. Starts background threads for each camera
+    when the app starts up and performs any cleanup on shutdown if needed.
+    """
     for camera in CAMERAS:
-        if not camera:
-            continue
-        print(f"Preloading camera: {camera}")
-        await ensure_ffmpeg_stream(camera)
-
+        thread = threading.Thread(target=ffmpeg_reader, args=(camera,), daemon=True)
+        thread.start()
+        print(f"Started background FFmpeg thread for camera: {camera}")
     yield
-
-    for reader in stream_readers.values():
-        reader.running = False
+    print("Shutting down application.")
 
 
 app = FastAPI(lifespan=lifespan)
 
 
-async def ensure_ffmpeg_stream(camera_name: str):
-    if camera_name in stream_readers:
-        return stream_readers[camera_name]
-
-    input_url = f"{RTC_HOST}/{camera_name}"
-    cmd = INVOCATION.format(input_url=input_url)
-
-    process = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-
-    if not process.stdout:
-        raise HTTPException(status_code=500, detail="Failed to open ffmpeg stream")
-
-    reader = MJPEGReader(process.stdout)
-    stream_readers[camera_name] = reader
-    asyncio.create_task(reader.run())
-    return reader
-
-
-class MJPEGReader:
-    def __init__(self, stdout):
-        self.stdout = stdout
-        self.buffer = b""
-        self.running = True
-        self.latest_frame = None
-        self.frame_event = asyncio.Event()
-        self._frame_samples = []
-
-    async def run(self):
-        try:
-            while self.running:
-                chunk = await self.stdout.read(4096)
-                if not chunk:
-                    break
-
-                self.buffer += chunk
-
-                # If our buffer exceeds 10MB, we can delete the first half
-                if len(self.buffer) > 1024 * 1024 * 10:
-                    self.buffer = self.buffer[len(self.buffer) // 2 :]
-
-                lf = None
-                while True:
-                    start = self.buffer.find(b"\xff\xd8")
-                    end = self.buffer.find(b"\xff\xd9", start)
-                    if start != -1 and end != -1 and end > start:
-                        frame = self.buffer[start : end + 2]
-                        self.buffer = self.buffer[end + 2 :]
-
-                        lf = frame
-                    else:
-                        await asyncio.sleep(0.01)  # Yield control to avoid busy waiting
-                        break
-                if lf:
-                    self.latest_frame = lf
-                    self.frame_event.set()
-                    # Reset buffer
-                    self.buffer = b""
-        except Exception as e:
-            print(f"[MJPEGReader] Error: {e}")
-
-    async def get_fresh_frame(self, timeout=1, _attempts=0):
-        try:
-            await asyncio.wait_for(self.frame_event.wait(), timeout)
-            self.frame_event.clear()
-            return self.latest_frame
-        except asyncio.TimeoutError:
-            if _attempts > 15:
-                raise HTTPException(
-                    status_code=504, detail="Timeout waiting for fresh frame"
-                )
-            else:
-                return await self.get_fresh_frame(timeout, _attempts + 1)
-
-
 @app.get("/{camera_name}")
-async def snap_frame(camera_name: str):
-    reader = await ensure_ffmpeg_stream(camera_name)
-    frame = await reader.get_fresh_frame()
+def get_latest_frame(camera_name: str):
+    """
+    Endpoint that returns the most recent JPEG image for the requested camera.
+    """
+    if camera_name not in CAMERAS:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    with frame_lock:
+        frame = latest_frames.get(camera_name)
+
+    if frame is None:
+        raise HTTPException(status_code=503, detail="No frame available yet")
+
     return Response(content=frame, media_type="image/jpeg")
-
-
-@app.get("/start/{camera_name}")
-async def start_stream(camera_name: str):
-    await ensure_ffmpeg_stream(camera_name)
-    return {"status": "stream started", "camera_name": camera_name}
-
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run(app, host=HOST, port=PORT)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

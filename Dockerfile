@@ -1,22 +1,12 @@
-FROM python:3.12 AS builder
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN python -m venv venv && \
-    . venv/bin/activate && \
-    pip install --no-cache-dir -r requirements.txt
-
-FROM python:3.12-slim AS runtime
+FROM python:3.12-alpine AS runtime
 
 WORKDIR /app
 
 # Install ffmpeg
-RUN apt-get update && \
-    apt-get install --no-install-recommends -y ffmpeg  && \
-    rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ffmpeg
 
-COPY --from=builder /app/venv /app/venv
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
-CMD ["venv/bin/python", "snaprtc.py"]
+CMD ["python", "snaprtc.py"]
